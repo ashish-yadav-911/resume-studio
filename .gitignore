@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.vercel/
+
+# Local data and secrets
+backend/data/
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+frontend/.env.local
+frontend/.env.*
+
+# OS/editor
+.DS_Store
+*.log
