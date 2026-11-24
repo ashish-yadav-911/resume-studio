@@ -43,7 +43,7 @@ outage cannot corrupt or block local state.
 | `load_context` | Load base resume version, facts, bounded chat context, JD. |
 | `classify` | Heuristic or LLM intent classification + deterministic validation. |
 | `clarify` | Ask one precise question when a required input is missing. |
-| `analyze` | Run research and/or JD matching concurrently. |
+| `analyze` | Acquire requirements (pasted JD, researched role brief, or company research) and run JD matching. |
 | `enhance` | Build candidate patches (or translation) from agent outputs. |
 | `propose` | Validate every patch, build candidate content, create a pending proposal. |
 | `special` | Undo/redo/export/compare/general chat without rewriting the resume. |
@@ -56,12 +56,30 @@ version history or the entire conversation.
 ### Request lifecycle
 
 1. `POST /api/conversations/{id}/messages` stores the user message and a queued run.
-2. A background task executes the LangGraph run.
-3. The frontend subscribes to `GET /api/runs/{id}/events` (resumable SSE with sequence IDs).
+2. Execution is claimed (`queued → running`, one atomic `UPDATE`) and the LangGraph run advances.
+   - Long-lived host: a background task started by the endpoint.
+   - Serverless (Vercel): no task is scheduled, because the instance is frozen once the response
+     is sent. The client posts `/api/runs/{id}/execute`, which claims the run and awaits the graph
+     inside that request (`maxDuration: 300`). The claim makes the two paths mutually exclusive.
+3. The frontend subscribes to `GET /api/runs/{id}/events` (resumable SSE with sequence IDs and a
+   15s keep-alive that re-checks run status), so replay works across instances.
 4. Agents emit `agent.started` / `agent.completed` / `validation.completed`.
 5. If changes exist, the run stops at `awaiting_approval` with a **pending proposal**.
 6. `POST /api/runs/{id}/approve` atomically creates a new immutable version.
 7. `POST /api/runs/{id}/reject` keeps the active version unchanged.
+
+### Requirement acquisition
+
+`analyze` needs requirements before it can score or tailor anything:
+
+| Situation | Path |
+| --- | --- |
+| JD pasted or attached | `job_matching.parse_job_description` → requirement ledger |
+| Company or role named, no JD | live web search → cited requirements brief → same matcher |
+| Company named with tailoring | `company_research` (official pages, ATS boards, Exa when configured) in parallel |
+
+Research output is data, never instructions: the brief lists the source URLs it used, and a run
+with no retrieved sources stops instead of inventing requirements.
 
 ## 3. Canonical resume and patch model
 
@@ -152,14 +170,21 @@ hiring probability or vendor ATS score.
 
 ## 8. Research providers
 
-Priority: Exa (when `EXA_API_KEY` is set) → Wikipedia REST → official company site
-(conventional `<slug>.com` hosts and careers/about pages) → Greenhouse/Lever public boards.
-Every source is a structured `Source` with URL, domain, kind, retrieval timestamp and an
+**Role/company requirement research** (`agents/role_research.py`) runs first when the user names
+a company or role without pasting a JD. It uses the provider's live web search (OpenRouter `web`
+plugin) with a small model, asks for `Role overview / Responsibilities / Requirements / Skills`,
+and keeps the provider's own URL citations. The brief is then parsed by the same JD matcher, so
+alignment and the skills ledger never depend on model memory. Answers are treated as untrusted
+data and are never turned into resume claims.
+
+**Company research** priority: Exa (when `EXA_API_KEY` is set) → Wikipedia REST → official
+company site (conventional `<slug>.com` hosts and careers/about pages) → Greenhouse/Lever public
+boards. Every source is a structured `Source` with URL, domain, kind, retrieval timestamp and an
 `official` flag. The synthesis agent may only cite URLs that were actually retrieved.
 
-Without an Exa key, research still returns Wikipedia and official-site pages, and job
-boards when public. If nothing is found, the agent says so instead of inventing company
-culture or priorities.
+Without live search or an Exa key, research still returns Wikipedia and official-site pages, and
+job boards when public. If nothing is found, the run says so — it does not invent company culture,
+priorities or role requirements.
 
 ## 9. Vector store choice
 

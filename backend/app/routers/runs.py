@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user, owned_run
 from ..db import SessionLocal, get_db
 from ..events import TERMINAL_EVENTS, bus, replay_events
+from ..orchestrator import orchestrator
 from ..firestore_sync import mirror_conversation, mirror_message, mirror_resume, mirror_version
 from ..models import Conversation, Message, Proposal, Resume, ResumeVersion, Run, User, utcnow
 from ..resume_service import apply_changes, create_version, get_path, supersede_pending_proposals
@@ -41,6 +42,27 @@ def get_run(
 def _format_sse(event: dict) -> str:
     data = json.dumps(event, ensure_ascii=False)
     return f"id: {event['seq']}\nevent: {event['type']}\ndata: {data}\n\n"
+
+
+@router.post("/{run_id}/execute")
+async def execute_run(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Drive a queued run to completion inside this request.
+
+    Serverless hosts reclaim the instance as soon as a response is sent, so a run
+    cannot be finished by a background task there. The client posts here immediately
+    after queueing a message and then reads GET /{run_id}/events, which replays the
+    persisted events. The claim inside ``execute`` makes this safe to call alongside a
+    local background worker: only one caller ever processes a run.
+    """
+    run = owned_run(db, run_id, user.id)
+    await orchestrator.execute(run.id)
+    db.expire_all()
+    run = owned_run(db, run_id, user.id)
+    return run_out(run, _proposal_for_run(db, run.id))
 
 
 @router.get("/{run_id}/events")

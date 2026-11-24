@@ -380,6 +380,19 @@ function Workspace() {
     await loadWorkspace();
   }
 
+  /**
+   * Serverless hosts freeze anything that outlives the HTTP response, so a queued run
+   * has to be executed by a request. This posts /execute; the SSE stream below replays
+   * the persisted events, so nothing is lost if this call is slow.
+   */
+  async function executeRun(id: string) {
+    try {
+      await apiFetch(`/api/runs/${id}/execute`, { method: "POST" });
+    } catch {
+      // The stream still surfaces whatever failure the run persisted.
+    }
+  }
+
   async function streamRun(id: string) {
     streamRef.current?.abort();
     const controller = new AbortController();
@@ -475,6 +488,7 @@ function Workspace() {
       }
       setMessages((prev) => prev.map((message) => (message.id === optimistic.id ? response.message : message)));
       setRunId(response.run_id);
+      void executeRun(response.run_id);
       await streamRun(response.run_id);
       await loadWorkspace();
     } catch (err) {

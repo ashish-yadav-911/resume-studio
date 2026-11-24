@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -34,6 +35,11 @@ _RUN_TASKS: set[asyncio.Task] = set()
 
 
 def _schedule(run_id: str) -> None:
+    if os.environ.get("VERCEL"):
+        # Serverless instances are frozen as soon as the response is sent, so a task
+        # started here would never finish. The client drives execution instead via
+        # POST /api/runs/{id}/execute.
+        return
     task = asyncio.create_task(orchestrator.execute(run_id), name=f"run:{run_id}")
     _RUN_TASKS.add(task)
     task.add_done_callback(_RUN_TASKS.discard)

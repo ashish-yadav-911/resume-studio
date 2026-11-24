@@ -8,7 +8,7 @@ from typing import Any, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .agents.company_research import company_research_agent
@@ -1666,14 +1666,25 @@ class Orchestrator:
         return "propose"
 
     async def execute(self, run_id: str) -> None:
+        """Run one queued run to completion.
+
+        The queued -> running transition is claimed atomically, so a scheduled worker
+        and a client-driven executor (serverless hosts, where a task cannot outlive the
+        response) can never process the same run twice. A claim that loses the race
+        returns immediately.
+        """
         with SessionLocal() as db:
+            claimed = db.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == "queued")
+                .values(status="running", updated_at=utcnow())
+            ).rowcount
+            db.commit()
+            if not claimed:
+                return
             run = db.get(Run, run_id)
             if not run:
                 return
-            run.status = "running"
-            run.updated_at = utcnow()
-            db.commit()
-            conversation = db.get(Conversation, run.conversation_id)
             base_version_id = run.base_version_id
         try:
             await self._emit_async(run_id, "run.started", {"run_id": run_id, "status": "running"})
