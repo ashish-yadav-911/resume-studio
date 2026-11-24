@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from .agents.company_research import company_research_agent
 from .agents.job_matching import job_matching_agent, parse_jd_heuristic
+from .agents.role_research import role_research_agent
 from .agents.section_enhancement import (
     build_candidate,
     normalize_sections,
@@ -67,6 +68,7 @@ class GraphState(TypedDict, total=False):
     target_company: str | None
     target_role: str | None
     research: dict[str, Any] | None
+    role_research: dict[str, Any] | None
     matching: dict[str, Any] | None
     enhancement: dict[str, Any] | None
     translation: dict[str, Any] | None
@@ -132,6 +134,28 @@ STOP_COMPANY = {
     "principal", "lead", "ai", "data", "software", "product", "engineering", "about",
 }
 
+ROLE_WORDS = {
+    "role", "position", "job", "opening", "engineer", "developer", "scientist", "manager",
+    "analyst", "designer", "architect", "intern", "remote", "company", "firm", "startup",
+    "this", "that", "them", "him", "her", "you", "us", "me",
+}
+
+# Common role acronyms so "optimize for FDE" is understood without a spelled-out title.
+ROLE_ACRONYMS = {
+    "FDE": "Forward Deployed Engineer",
+    "SWE": "Software Engineer",
+    "SDE": "Software Engineer",
+    "MLE": "Machine Learning Engineer",
+    "AIE": "AI Engineer",
+    "DS": "Data Scientist",
+    "DE": "Data Engineer",
+    "SRE": "Site Reliability Engineer",
+    "PM": "Product Manager",
+    "TPM": "Technical Program Manager",
+    "EM": "Engineering Manager",
+}
+NON_ROLE_ACRONYMS = {"AI", "ML", "LLM", "CV", "JD", "ATS", "UI", "UX", "HR", "IT", "US", "UK", "EU"}
+
 SPECIAL_INTENTS = {
     Intent.GENERAL_CHAT, Intent.RESUME_EXPORT, Intent.VERSION_COMPARISON, Intent.UNDO, Intent.REDO
 }
@@ -156,16 +180,34 @@ def _extract_company(message: str) -> str | None:
             candidate = " ".join(words)
             if candidate and candidate.lower() not in STOP_COMPANY and len(candidate) <= 60:
                 return candidate
+
+    # Lowercase brand names ("optimize my resume for google"). Only trusted for
+    # tailoring requests, and only when the token is a lone word rather than the
+    # start of a role phrase like "for forward deployed engineer".
+    if re.search(r"\b(optimi[sz]e|tailor|target|match|company|employer)\b", message, re.I):
+        for match in re.finditer(r"\b(?:for|at)\s+(?:a|an|the)?\s*([a-z][a-z0-9&+'-]{2,20})\b", message):
+            token = match.group(1)
+            tail = message[match.end():match.end() + 24]
+            if token in STOP_COMPANY or token in ROLE_WORDS:
+                continue
+            if re.match(r"\s+[a-z]{2,}", tail):
+                continue
+            return token[0].upper() + token[1:]
     return None
 
 
 def _extract_role(message: str) -> str | None:
     message = (message or "")[:800]
+    acronyms = {m.group(1).upper() for m in re.finditer(r"\b([A-Z]{2,5})\b", message)} - NON_ROLE_ACRONYMS
+    known = sorted(a for a in acronyms if a in ROLE_ACRONYMS)
+    if len(known) == 1:
+        return ROLE_ACRONYMS[known[0]]
     patterns = [
         r"(?:target|desired)\s+(?:role|position|job)\s*(?:is|:)?\s*([A-Za-z][\w /&+.-]{2,60})",
         r"\bfor\s+(?:a|an)?\s*([A-Za-z][\w /&+.-]{2,60}?)\s+(?:role|position|job)\b",
         r"\bas\s+(?:a|an)\s+([A-Za-z][\w /&+.-]{2,60}?)(?:[,.]|$)",
         r"\b(?:a|an)\s+((?:Senior|Staff|Principal|Lead|Junior|Mid[- ]level)?\s*[A-Za-z]*(?:Engineer|Developer|Scientist|Manager|Analyst|Designer|Architect))\b",
+        r"\bfor\s+(?:a|an)?\s*((?:forward deployed|full[ -]stack|backend|frontend|platform|applied ai|ai|ml|machine learning)?\s*[A-Za-z]*(?:Engineer|Developer|Scientist|Manager|Analyst|Designer|Architect))\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, message, re.I)
@@ -287,21 +329,43 @@ def heuristic_intent(
 
     if company and optimize_language:
         agents = [AGENT_RESEARCH]
-        if has_jd or jd_in_message or job_language:
+        pasted_requirements = has_jd or jd_in_message
+        # With no pasted JD, matching still runs - against researched requirements.
+        if pasted_requirements or job_language or not research_only:
             agents.append(AGENT_MATCHING)
         if not research_only:
             agents.append(AGENT_ENHANCEMENT)
+        requirements_research = not pasted_requirements and AGENT_MATCHING in agents
         return IntentResult(
             intent=Intent.COMPANY_OPTIMIZATION,
             agents=agents,
             requires_company=True,
-            requires_job_description=AGENT_MATCHING in agents,
+            requires_job_description=pasted_requirements,
+            requirements_research=requirements_research,
             requires_resume=True,
             target_sections=sections,
             target_company=company,
             target_role=role,
             execution_strategy="parallel_then_sequential" if len(agents) > 1 else "single",
             confidence=0.8,
+        )
+    if role and (optimize_language or job_language) and not (has_jd or jd_in_message):
+        # "Optimize my resume for a forward deployed engineer role": there is no JD to
+        # read, so the requirements are researched before matching and tailoring.
+        agents = [AGENT_MATCHING]
+        if not re.search(r"\b(tell me|just|explain|score|how well)\b", lower):
+            agents.append(AGENT_ENHANCEMENT)
+        return IntentResult(
+            intent=Intent.JOB_MATCHING,
+            agents=agents,
+            requires_job_description=False,
+            requirements_research=settings.web_search_enabled,
+            requires_resume=True,
+            target_sections=sections,
+            target_company=company,
+            target_role=role,
+            execution_strategy="parallel_then_sequential" if len(agents) > 1 else "single",
+            confidence=0.78,
         )
     if job_language or jd_in_message:
         agents = [AGENT_MATCHING]
@@ -390,15 +454,38 @@ def validate_intent(
     language = raw.translation_language or language
     market = raw.translation_market or market
     explicit_sections = _extract_sections(message)
-    sections = [s for s in (raw.target_sections or explicit_sections) if s in SECTION_WORDS]
-    if not sections:
-        sections = explicit_sections
+    # Honor sections the user named in the message even when the classifier omitted them.
+    # Explicit mentions take precedence; classifier targets fill the rest.
+    sections: list[str] = []
+    for section in (explicit_sections + [s for s in (raw.target_sections or []) if s in SECTION_WORDS]):
+        if section in SECTION_WORDS and section not in sections:
+            sections.append(section)
 
     # Remove hallucinated companies that do not appear in the message or prior context.
     if raw.target_company:
         context_ok = conversation_company and conversation_company.lower() == raw.target_company.lower()
         if raw.target_company.lower() not in message_lower and not context_ok:
             company = _extract_company(message) or conversation_company
+
+    # A company or an explicit role named in the message, plus tailoring language and no
+    # pasted JD, means the requirements must be researched rather than demanded from the user.
+    explicit_role = _extract_role(message)
+    explicit_company = _extract_company(message)
+    tailoring_language = _wants_changes(message) or bool(
+        re.search(r"\b(optimi[sz]e|tailor|target|match|align|fit|suit|company|employer)\b", message_lower)
+    )
+    research_requirements = bool(
+        not has_jd
+        and settings.web_search_enabled
+        and (explicit_role or explicit_company)
+        and tailoring_language
+        and intent not in SPECIAL_INTENTS
+        and intent != Intent.TRANSLATION
+        and not re.search(r"\b(tell me|just|explain|how well|score)\b", message_lower)
+    )
+    if research_requirements:
+        role = explicit_role or role
+        company = explicit_company or company
 
     if intent in SPECIAL_INTENTS:
         agents = set()
@@ -408,12 +495,15 @@ def validate_intent(
         agents.discard(AGENT_RESEARCH)
         if has_jd:
             agents.add(AGENT_MATCHING)
-        else:
+        elif not research_requirements:
             agents.discard(AGENT_MATCHING)
     elif intent == Intent.TRANSLATION:
         agents = {AGENT_TRANSLATION}
     elif intent == Intent.SECTION_ENHANCEMENT:
         agents.add(AGENT_ENHANCEMENT)
+        if research_requirements:
+            intent = Intent.JOB_MATCHING
+            agents.add(AGENT_MATCHING)
     elif intent == Intent.COMPANY_OPTIMIZATION:
         agents.add(AGENT_RESEARCH)
         if not company:
@@ -424,22 +514,32 @@ def validate_intent(
             agents.discard(AGENT_MATCHING)
         if _wants_changes(message) or "optimi" in message_lower or "tailor" in message_lower:
             agents.add(AGENT_ENHANCEMENT)
+        if research_requirements:
+            agents.add(AGENT_MATCHING)
     elif intent == Intent.JOB_MATCHING:
         agents.add(AGENT_MATCHING)
-        if not has_jd:
+        if not has_jd and not research_requirements:
             agents.discard(AGENT_MATCHING)
-        if _wants_changes(message) and not re.search(r"\b(tell me|just|score|how well|explain)\b", message_lower):
+        # "Match/align/tailor my resume or skills to this JD" is a change request even when the
+        # message contains no explicit edit verb; analysis alone would only list the gaps.
+        wants_tailoring = _wants_changes(message) or bool(
+            has_jd
+            and re.search(r"\b(match|align|tailor|fit|suit|optimis|optimiz)\w*", message_lower)
+            and re.search(r"\b(resume|skills?|profile|cv)\b", message_lower)
+        )
+        if wants_tailoring and not re.search(r"\b(tell me|just|score|how well|explain)\b", message_lower):
             agents.add(AGENT_ENHANCEMENT)
     agents.discard(AGENT_TRANSLATION)
     if not company:
         agents.discard(AGENT_RESEARCH)
-    if not has_jd:
+    if not has_jd and not research_requirements:
         agents.discard(AGENT_MATCHING)
 
     if not has_resume:
         agents = set()
+        research_requirements = False
     requires_company = intent == Intent.COMPANY_OPTIMIZATION or AGENT_RESEARCH in agents
-    requires_jd = intent == Intent.JOB_MATCHING or AGENT_MATCHING in agents
+    requires_jd = (intent == Intent.JOB_MATCHING or AGENT_MATCHING in agents) and not research_requirements
     requires_language = intent == Intent.TRANSLATION
 
     if not sections:
@@ -449,10 +549,13 @@ def validate_intent(
             sections = ["personal_information"] if re.search(r"\bname\b", message_lower) else ["experience"]
         else:
             sections = []
-    # For JD-driven tailoring, default to all core sections only when the user did not name a
-    # specific section. Explicit requests such as "skills only" are honored.
-    if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING} and has_jd and not explicit_sections and not raw.target_sections:
-        sections = ["experience", "skills", "professional_summary", "education"]
+    # For JD-driven tailoring, cover every core section the resume has unless the user named
+    # specific sections. The classifier alone must never drop skills from a JD comparison, since
+    # the deterministic JD-to-skills reconciliation feeds that section.
+    if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING} and (has_jd or research_requirements) and not explicit_sections:
+        for core in ("professional_summary", "skills", "experience", "education"):
+            if core not in sections and (content is None or content.get(core)):
+                sections.append(core)
 
     clarification = None
     if intent not in {Intent.GENERAL_CHAT, Intent.UNDO, Intent.REDO} and not has_resume:
@@ -494,6 +597,7 @@ def validate_intent(
         translation_language=language,
         translation_market=market,
         execution_strategy=execution,
+        requirements_research=research_requirements,
         clarification_required=bool(clarification),
         clarification_question=clarification,
         confidence=raw.confidence,
@@ -731,6 +835,63 @@ class Orchestrator:
         tasks: list[asyncio.Task] = []
         labels: list[str] = []
         notes = list(state.get("notes", []))
+        early: dict[str, Any] = {}
+
+        # No pasted JD: research what the company/role actually requires, then match
+        # against that brief exactly like a job description.
+        jd_text = state.get("job_description")
+        if intent.requirements_research and not jd_text and AGENT_MATCHING in agents:
+            target = intent.target_role or "this role"
+            if intent.target_company:
+                target += f" at {intent.target_company}"
+            await self._emit_async(
+                state["run_id"], "agent.started",
+                {"agent": AGENT_MATCHING, "message": f"Researching what {target} requires…"},
+            )
+            role_research, research_meta = await role_research_agent.research(
+                role=intent.target_role or "",
+                company=intent.target_company,
+                content=state.get("content"),
+            )
+            early["role_research"] = role_research.as_dict()
+            await self._emit_async(
+                state["run_id"], "agent.completed",
+                {
+                    "agent": AGENT_MATCHING,
+                    "summary": (
+                        f"Researched {target} from {len(role_research.sources)} public source(s)."
+                        if role_research.brief
+                        else f"No reliable public description of {target} was found."
+                    ),
+                    "mode": research_meta.get("mode"),
+                },
+            )
+            if role_research.brief:
+                jd_text = role_research.brief
+                early["job_description"] = jd_text
+                early["has_jd"] = True
+                notes.extend(role_research.limitations)
+                if role_research.sources:
+                    notes.append(
+                        "Requirements were researched from public sources rather than a pasted job description."
+                    )
+            else:
+                source_links = "\n".join(
+                    f"- [{src.get('title', 'source')}]({src.get('url')})" for src in role_research.sources[:5]
+                )
+                response = (
+                    f"I could not verify what **{target}** typically requires from public sources, so I will not "
+                    "guess at requirements and rewrite your resume against assumptions.\n\n"
+                    + ("**Sources checked:**\n" + source_links + "\n\n" if source_links else "")
+                    + "Paste the job description, or name the company and I will research it before tailoring."
+                )
+                return {
+                    "final_response": response,
+                    "status": "completed",
+                    "changes": [],
+                    "notes": notes,
+                    **early,
+                }
 
         if AGENT_RESEARCH in agents and intent.target_company:
             labels.append(AGENT_RESEARCH)
@@ -749,16 +910,16 @@ class Orchestrator:
                     )
                 )
             )
-        if AGENT_MATCHING in agents and state.get("job_description"):
+        if AGENT_MATCHING in agents and jd_text:
             labels.append(AGENT_MATCHING)
             await self._emit_async(
                 state["run_id"], "agent.started",
                 {"agent": AGENT_MATCHING, "message": "Analyzing job requirements and resume evidence…"},
             )
-            tasks.append(asyncio.create_task(self._run_matching(state, intent)))
+            tasks.append(asyncio.create_task(self._run_matching(state, intent, jd_text)))
 
         results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
-        update: dict[str, Any] = {}
+        update: dict[str, Any] = dict(early)
         failures: list[str] = []
         for label, result in zip(labels, results):
             if isinstance(result, Exception):
@@ -814,8 +975,11 @@ class Orchestrator:
             update["status"] = "completed"
         return update
 
-    async def _run_matching(self, state: GraphState, intent: IntentResult) -> tuple[Any, dict[str, Any]]:
-        jd_text = state["job_description"] or ""
+    async def _run_matching(
+        self, state: GraphState, intent: IntentResult, jd_text: str | None = None
+    ) -> tuple[Any, dict[str, Any]]:
+        if jd_text is None:
+            jd_text = state.get("job_description") or ""
         with SessionLocal() as db:
             conversation = db.get(Conversation, state["conversation_id"])
             jd = db.get(JobDescription, conversation.job_description_id) if conversation.job_description_id else None
@@ -878,12 +1042,56 @@ class Orchestrator:
             }
 
         sections = normalize_sections(intent.target_sections, content)
+        matching = state.get("matching") or {}
+        research = state.get("research") or {}
+
+        # Agentic guard: do not produce cosmetic rewrites for a fundamentally mismatched job
+        # description. A resume cannot be "made into" a different profession by wording alone;
+        # surface the gaps instead of proposing misleading improvements.
+        mismatched = False
+        if state.get("has_jd") and isinstance(matching, dict) and matching:
+            score = int(matching.get("match_score", 0) or 0)
+            reqs = matching.get("requirements") or []
+            demonstrated_required = [
+                r for r in reqs
+                if isinstance(r, dict) and r.get("status") == "demonstrated"
+                and r.get("importance") != "preferred"
+            ]
+            if score < 20 and not demonstrated_required:
+                mismatched = True
+
+        if mismatched:
+            await self._emit_async(
+                state["run_id"], "agent.started",
+                {"agent": AGENT_ENHANCEMENT, "message": "Checking whether tailoring is supported by your resume…"},
+            )
+            validation = ValidationResult(
+                valid=False,
+                errors=["The resume does not demonstrate the core requirements of this job description."],
+                clarification_question=(
+                    "Your resume does not evidence the core requirements of this job description, so I will not "
+                    "rewrite it to look like a different role. Review the gaps above; add real experience or "
+                    "choose a closer job description, and I can tailor from there."
+                ),
+            )
+            guard_notes = notes + ["Skipped enhancement: job description is not supported by resume evidence."]
+            await self._emit_async(
+                state["run_id"], "agent.completed",
+                {"agent": AGENT_ENHANCEMENT, "summary": "0 changes (job description not supported by resume evidence).", "mode": "guard"},
+            )
+            response = self._no_change_response(state, validation)
+            return {
+                "changes": [],
+                "validation": validation.model_dump(),
+                "notes": guard_notes,
+                "status": "completed",
+                "final_response": response,
+            }
+
         await self._emit_async(
             state["run_id"], "agent.started",
             {"agent": AGENT_ENHANCEMENT, "message": f"Strengthening the {', '.join(sections)} section(s)…"},
         )
-        matching = state.get("matching") or {}
-        research = state.get("research") or {}
         enhancement, validation, meta = await section_enhancement_agent.enhance(
             content=content,
             facts=facts,
@@ -891,6 +1099,8 @@ class Orchestrator:
             user_request=state["user_message"],
             target_role=intent.target_role,
             jd_requirements=matching.get("requirements", []) if isinstance(matching, dict) else [],
+            section_requirements=matching.get("section_requirements", {}) if isinstance(matching, dict) else {},
+            missing_skills=matching.get("missing_skills", []) if isinstance(matching, dict) else [],
             research_recommendations=research.get("optimization_recommendations", []) if isinstance(research, dict) else [],
         )
         if meta.get("mode") in {"heuristic", "heuristic_fallback"}:
@@ -1048,6 +1258,8 @@ class Orchestrator:
     async def finalize(self, state: GraphState) -> dict[str, Any]:
         run_id = state["run_id"]
         status = state.get("status") or "completed"
+        if status == "running":
+            status = "completed"
         response = state.get("final_response") or ""
         error = state.get("error")
         if error:
@@ -1071,6 +1283,7 @@ class Orchestrator:
             )
             run.agent_outputs = {
                 "research": state.get("research"),
+                "role_research": state.get("role_research"),
                 "matching": state.get("matching"),
                 "enhancement": state.get("enhancement"),
                 "translation": state.get("translation"),
@@ -1160,9 +1373,30 @@ class Orchestrator:
         parts = [f"### Proposed changes ({count} ready for review)"]
         sections = sorted({c.get("section", "") for c in changes if c.get("status") == "proposed"})
         parts.append(f"I prepared a new resume candidate from your current version. Sections: {', '.join(sections)}.")
-        if matching:
+        role_research = state.get("role_research") or {}
+        additions = [c for c in changes if c.get("status") == "proposed" and c.get("operation") == "add"]
+        skill_additions = [c for c in additions if c.get("section") == "skills"]
+        entry_additions = [c for c in additions if c.get("section") in {"experience", "projects", "education"}]
+        if skill_additions:
+            source = "the researched role requirements" if role_research else "the job description"
             parts.append(
-                f"**Job alignment:** {matching.get('match_score', 0)}/100 (heuristic resume alignment). "
+                f"**Skills added from {source}:** "
+                + ", ".join(c.get("after", "") for c in skill_additions[:12])
+            )
+            if any(c.get("requires_user_confirmation") for c in skill_additions):
+                parts.append(
+                    "Some additions are not evidenced elsewhere in your resume. Uncheck any you do not "
+                    "genuinely have before accepting."
+                )
+        if entry_additions:
+            parts.append(
+                f"**New entries drafted:** {len(entry_additions)}. These add wording that is not in your "
+                "current resume - confirm each one describes work you really did."
+            )
+        if matching:
+            label = "Role alignment" if role_research else "Job alignment"
+            parts.append(
+                f"**{label}:** {matching.get('match_score', 0)}/100 (heuristic resume alignment). "
                 + ("Missing skills: " + ", ".join(matching.get("missing_skills", [])[:8]) + "." if matching.get("missing_skills") else "No JD skills were missing from the resume.")
             )
         if research:
@@ -1170,6 +1404,18 @@ class Orchestrator:
                 f"**Company research:** {len(research.get('sources', []))} live source(s) retained"
                 + (f" for {research.get('company')}." if research.get("company") else ".")
             )
+        if role_research:
+            sources = role_research.get("sources") or []
+            parts.append(
+                f"**Requirements researched:** {role_research.get('role', 'target role')}"
+                + (f" at {role_research.get('company')}" if role_research.get("company") else "")
+                + f" — {len(sources)} public source(s), no pasted job description."
+            )
+            if sources:
+                parts.append(
+                    "**Sources:**\n"
+                    + "\n".join(f"- [{s.get('title', 'source')}]({s.get('url')})" for s in sources[:5] if s.get("url"))
+                )
         parts.append(
             "**Nothing has been saved yet.** Review the before/after diff and accept or reject individual changes. "
             "Approval creates an immutable new version."
@@ -1211,6 +1457,16 @@ class Orchestrator:
                     "**Sources:**\n"
                     + "\n".join(f"- [{s.get('title', 'source')}]({s.get('url')})" for s in research["sources"][:6] if s.get("url"))
                 )
+        role_research = state.get("role_research") or {}
+        if role_research.get("sources"):
+            parts.append(
+                f"### Requirements researched: {role_research.get('role', 'target role')}\n\n"
+                + "\n".join(
+                    f"- [{s.get('title', 'source')}]({s.get('url')})"
+                    for s in role_research["sources"][:5]
+                    if s.get("url")
+                )
+            )
         if validation.unsupported_claims:
             parts.append(
                 "I did **not** save changes containing unsupported claims:\n"
@@ -1405,9 +1661,9 @@ class Orchestrator:
     def _route_enhance(state: GraphState) -> str:
         if state.get("status") == "failed" or state.get("error"):
             return "finalize"
-        if state.get("changes"):
-            return "propose"
-        return "finalize"
+        # Always hand off to propose: it creates a proposal when changes exist and otherwise
+        # produces the no-change/gap response, ensuring the run reaches a terminal status.
+        return "propose"
 
     async def execute(self, run_id: str) -> None:
         with SessionLocal() as db:

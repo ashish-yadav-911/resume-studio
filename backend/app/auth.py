@@ -5,6 +5,7 @@ import threading
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -81,9 +82,7 @@ def get_current_user(
                 email=firebase_user.email,
                 display_name=firebase_user.display_name,
             )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
+            _insert_user(db, user)
         request.state.user_id = user.id
         return user
 
@@ -97,11 +96,26 @@ def get_current_user(
     user = db.get(User, user_id)
     if not user:
         user = User(id=user_id, email=f"{user_id}@local.dev", display_name=user_id.replace("-", " ").title())
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        _insert_user(db, user)
     request.state.user_id = user.id
     return user
+
+
+def _insert_user(db: Session, user: User) -> None:
+    """Insert a first-seen user without failing concurrent first requests.
+
+    Two requests for a brand-new identity can race here; the loser gets an
+    IntegrityError on the primary key and simply re-reads the row the winner wrote.
+    """
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if not db.get(User, user.id):
+            raise
+        return
+    db.refresh(user)
 
 
 def re_safe_user_id(value: str) -> bool:

@@ -57,6 +57,8 @@ type Change = {
   section?: string;
   before?: string;
   after?: string;
+  operation?: string;
+  requires_user_confirmation?: boolean;
   reason?: string;
   status: string;
   agent?: string;
@@ -361,6 +363,10 @@ function Workspace() {
     setRun(payload);
     const nextProposal = payload.proposal || null;
     setProposal(nextProposal);
+    const missingSkills = payload.agent_outputs?.matching?.missing_skills;
+    if (Array.isArray(missingSkills) && missingSkills.length > 0 && !nextProposal) {
+      setNotice(`Skills the job asks for but not evidenced in your resume: ${missingSkills.slice(0, 8).join(", ")}. Add real experience with these before tailoring.`);
+    }
     if (nextProposal) {
       setSelected(nextProposal.changes.filter((c) => c.status === "proposed").map((c) => c.id));
       setRightTab("changes");
@@ -1075,9 +1081,20 @@ function Workspace() {
                           </span>
                         </div>
                         <div className="change-diff">
-                          {change.before && <div className="before">{change.before}</div>}
-                          {change.after && <div className="after">{change.after}</div>}
+                          {change.operation === "add" ? (
+                            <div className="after">+ {change.after}</div>
+                          ) : change.operation === "remove" ? (
+                            <div className="before">− {change.before}</div>
+                          ) : (
+                            <>
+                              {change.before && <div className="before">{change.before}</div>}
+                              {change.after && <div className="after">{change.after}</div>}
+                            </>
+                          )}
                         </div>
+                        {change.requires_user_confirmation && (
+                          <div className="change-reason warn">Confirm you genuinely have this before accepting.</div>
+                        )}
                         {change.reason && <div className="change-reason">Why: {change.reason}</div>}
                       </div>
                     );

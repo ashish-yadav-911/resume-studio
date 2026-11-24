@@ -126,6 +126,9 @@ class IntentResult(BaseModel):
     requires_job_description: bool = False
     requires_company: bool = False
     requires_resume: bool = True
+    # True when no job description was supplied and the requirements come from
+    # live research of the named company/role instead.
+    requirements_research: bool = False
     target_sections: list[str] = Field(default_factory=list)
     target_company: str | None = None
     target_role: str | None = None
@@ -220,6 +223,7 @@ class JobMatchResult(BaseModel):
     experience_gaps: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
     sections_to_update: list[str] = Field(default_factory=list)
+    section_requirements: dict[str, list[str]] = Field(default_factory=dict)
     score_explanation: str = ""
     breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
     limitations: list[str] = Field(default_factory=list)
@@ -246,6 +250,10 @@ class ProposedChange(BaseModel):
     field_path: str
     before: str = ""
     after: str = ""
+    # replace: overwrite an existing string field (default).
+    # add: append `after` to the list at field_path (e.g. skills.0.items).
+    # remove: delete the existing list item at field_path.
+    operation: str = "replace"
     reason: str = ""
     supporting_fact_ids: list[str] = Field(default_factory=list)
     requires_user_confirmation: bool = False

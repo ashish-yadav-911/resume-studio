@@ -13,7 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .db import init_db
+from .db import SessionLocal, init_db
+from .models import Run, utcnow
 from .routers import conversations, resumes, runs, system
 from .security import rate_limiter
 
@@ -33,6 +34,14 @@ logger = logging.getLogger("resume_studio")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Recover runs left dangling by a previous process/exception so they stop blocking new messages.
+    with SessionLocal() as db:
+        stale = db.query(Run).filter(Run.status.in_(["queued", "running"])).all()
+        for run in stale:
+            run.status = "failed"
+            run.final_response = run.final_response or "The run was interrupted before completion. Please retry."
+            run.updated_at = utcnow()
+        db.commit()
     if not settings.llm_enabled:
         logger.warning(
             "OPENAI_API_KEY is not configured: running in deterministic local mode. "

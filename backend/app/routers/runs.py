@@ -183,6 +183,19 @@ async def approve_run(
     seen_paths: set[str] = set()
     for change in selected:
         path = change.get("field_path", "")
+        operation = (change.get("operation") or "replace").lower()
+        if operation == "add":
+            # Several additions may target the same list; only guard against duplicates.
+            try:
+                target_list = get_path(base_version.content, path)
+            except KeyError:
+                raise HTTPException(status_code=409, detail=f"Change target no longer exists: {path}")
+            if not isinstance(target_list, list):
+                raise HTTPException(status_code=409, detail=f"Change target is not a list: {path}")
+            addition = (change.get("after") or "").strip()
+            if any(isinstance(item, str) and item.strip() == addition for item in target_list):
+                raise HTTPException(status_code=409, detail=f"'{addition}' is already present in {path}.")
+            continue
         if path in seen_paths:
             raise HTTPException(status_code=409, detail=f"Duplicate change path in proposal: {path}")
         seen_paths.add(path)
@@ -190,6 +203,13 @@ async def approve_run(
             current_value = get_path(base_version.content, path)
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Change target no longer exists: {path}")
+        if operation == "remove":
+            if not isinstance(current_value, str) or current_value.strip() != (change.get("before") or current_value).strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"The item to remove at {path} changed. Request a fresh proposal.",
+                )
+            continue
         if not isinstance(current_value, str) or current_value.strip() != (change.get("before") or "").strip():
             raise HTTPException(
                 status_code=409,

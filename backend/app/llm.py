@@ -131,6 +131,64 @@ class LLMClient:
         except (KeyError, IndexError):
             return LLMResult(None, "Invalid LLM response.", False)
 
+    async def web_search(
+        self,
+        *,
+        prompt: str,
+        system: str | None = None,
+        max_results: int | None = None,
+        max_tokens: int = 1100,
+        temperature: float = 0.2,
+    ) -> LLMResult:
+        """Ask a small model to answer using the provider's live web search.
+
+        Returns ``{"text": str, "sources": [{"title", "url", "snippet"}]}`` where the
+        sources are the provider's own citations.  Providers without retrieval are
+        rejected so the caller can fall back to the key-free research pipeline.
+        """
+        if not self.enabled:
+            return LLMResult(None, "LLM is not configured (OPENAI_API_KEY missing).", True)
+        if "openrouter.ai" not in settings.openai_base_url:
+            return LLMResult(None, "Live web search requires an OpenRouter-compatible provider.", False)
+        payload: dict[str, Any] = {
+            "model": settings.web_search_model or settings.openai_model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system or SYSTEM_GUARD},
+                {"role": "user", "content": prompt},
+            ],
+            "plugins": [{"id": "web", "max_results": max_results or settings.web_search_max_results}],
+        }
+        data, error = await self._post(payload)
+        if data is None:
+            return LLMResult(None, error, False)
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError):
+            return LLMResult(None, "Invalid web search response.", False)
+        text = (message.get("content") or "").strip()
+        if not text:
+            return LLMResult(None, "Web search returned no answer.", False)
+        sources: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for annotation in message.get("annotations") or []:
+            citation = annotation.get("url_citation") if isinstance(annotation, dict) else None
+            if not isinstance(citation, dict):
+                continue
+            url = str(citation.get("url") or "")
+            if not url.startswith(("http://", "https://")) or url in seen:
+                continue
+            seen.add(url)
+            sources.append(
+                {
+                    "title": str(citation.get("title") or url)[:250],
+                    "url": url,
+                    "snippet": re.sub(r"\s+", " ", str(citation.get("content") or ""))[:1200],
+                }
+            )
+        return LLMResult({"text": text, "sources": sources}, None, False)
+
     async def _post(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
         headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
         last_error = "LLM request failed."

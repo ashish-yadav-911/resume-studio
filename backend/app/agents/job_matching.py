@@ -495,6 +495,42 @@ class JobMatchingAgent:
         match.breakdown = breakdown
         match.score_explanation = explanation
         match.limitations = list(dict.fromkeys(limitations))[:12]
+
+        # Per-section comparison: group requirements by the resume section they most
+        # naturally inform, so enhancement can tailor section-by-section instead of
+        # producing generic rewrites.
+        section_groups: dict[str, list[str]] = {
+            "professional_summary": [],
+            "skills": [],
+            "experience": [],
+            "projects": [],
+        }
+        for req in validated:
+            text = req.requirement.strip()
+            if not text:
+                continue
+            cat = (req.category or "other").lower()
+            low = text.lower()
+            if cat == "technical" or any(
+                k in low for k in ("skill", "tool", "framework", "language", "library", "stack")
+            ):
+                section_groups["skills"].append(text)
+            elif cat in {"experience", "domain"} or any(
+                k in low for k in ("experience", "years", "project", "built", "shipped", "product")
+            ):
+                if "project" in low:
+                    section_groups["projects"].append(text)
+                else:
+                    section_groups["experience"].append(text)
+            else:
+                section_groups["professional_summary"].append(text)
+        # Make every technical skill the job asks for explicitly visible to skills reconciliation,
+        # including ones mentioned only in the parsed skills list.
+        if missing_skills:
+            section_groups["skills"].extend(f"Required skill: {skill}" for skill in missing_skills)
+        match.section_requirements = {
+            k: v for k, v in section_groups.items() if v
+        }
         valid_sections = {
             "professional_summary", "experience", "skills", "projects", "education",
             "certifications", "languages", "custom_sections", "personal_information",

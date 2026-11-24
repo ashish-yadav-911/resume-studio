@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2
 
     # Research
+    # Live web search used to derive role/company requirements when the user asks
+    # to optimize for a company or role without pasting a job description.
+    web_search_enabled: bool = True
+    web_search_model: str | None = None
+    web_search_max_results: int = 4
     exa_api_key: str | None = None
     exa_base_url: str = "https://api.exa.ai"
     research_timeout_seconds: float = 20.0

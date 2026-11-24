@@ -211,10 +211,62 @@ def apply_change(content: dict[str, Any], path: str, after: str) -> dict[str, An
     return updated
 
 
+def apply_change_operation(content: dict[str, Any], change: dict[str, Any]) -> None:
+    """Apply a single proposed change, supporting list append/removal."""
+    operation = (change.get("operation") or "replace").lower()
+    path = change["field_path"]
+    if operation == "replace":
+        set_path(content, path, change.get("after", ""))
+        return
+    parts = parse_path(path)
+    if not parts:
+        raise KeyError("Empty field path")
+    if operation == "add":
+        # For "add", the path points AT the list field (e.g. "skills.0.items").
+        target = get_path(content, path)
+        if not isinstance(target, list):
+            raise KeyError(f"Cannot add to a non-list field: {path}")
+        value = change.get("after", "")
+        if not isinstance(value, str) or not value.strip():
+            return
+        target.append(value.strip())
+        return
+    parent = content
+    for part in parts[:-1]:
+        if isinstance(parent, list):
+            if isinstance(part, str) and part.isdigit():
+                part = int(part)
+            if not isinstance(part, int) or part >= len(parent) or part < 0:
+                raise KeyError(f"Invalid list index in path: {path}")
+            parent = parent[part]
+        else:
+            if not isinstance(parent, dict) or part not in parent:
+                raise KeyError(f"Unknown field in path: {path}")
+            parent = parent[part]
+    if operation == "remove":
+        if not isinstance(parent, list):
+            raise KeyError(f"Invalid list index in path: {path}")
+        wanted = (change.get("before") or "").strip()
+        # Prefer removing by value so multiple removals in one list do not shift each other.
+        if wanted:
+            for index, item in enumerate(parent):
+                if isinstance(item, str) and item.strip() == wanted:
+                    del parent[index]
+                    return
+        last = parts[-1]
+        if isinstance(last, str) and last.isdigit():
+            last = int(last)
+        if not isinstance(last, int) or not (0 <= last < len(parent)):
+            raise KeyError(f"Invalid list index in path: {path}")
+        del parent[last]
+        return
+    raise KeyError(f"Unknown operation: {operation}")
+
+
 def apply_changes(content: dict[str, Any], changes: list[dict[str, Any]]) -> dict[str, Any]:
     updated = copy.deepcopy(content)
     for change in changes:
-        set_path(updated, change["field_path"], change["after"])
+        apply_change_operation(updated, change)
     return updated
 
 

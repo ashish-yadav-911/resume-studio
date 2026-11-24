@@ -1,3 +1,5 @@
+import pytest
+
 from app.agents.common import extract_skills, quote_in_resume, skill_status
 from app.agents.job_matching import compute_match_score, parse_jd_heuristic
 from app.research import is_public_http_url
@@ -104,6 +106,152 @@ def test_nested_patch_paths_and_partial_apply():
     assert any(item["field_path"] == "professional_summary" for item in diff)
 
 
+def test_apply_changes_supports_add_and_remove_operations():
+    content = {"skills": [{"category": "Backend", "items": ["Python", "FastAPI"]}]}
+    applied = apply_changes(
+        content,
+        [
+            {"field_path": "skills.0.items", "after": "Django", "operation": "add"},
+            {"field_path": "skills.0.items.1", "before": "FastAPI", "after": "", "operation": "remove"},
+        ],
+    )
+    assert applied["skills"][0]["items"] == ["Python", "Django"]
+    assert content["skills"][0]["items"] == ["Python", "FastAPI"]
+
+
+@pytest.mark.asyncio
+async def test_jd_skills_are_proposed_as_skill_additions(monkeypatch):
+    from app.agents import section_enhancement as section_enhancement_module
+    from app.agents.section_enhancement import SectionEnhancementAgent, build_candidate
+
+    monkeypatch.setattr(section_enhancement_module.llm, "enabled", False)
+    content = {
+        "personal_information": {"full_name": "Avery Chen"},
+        "professional_summary": "Backend engineer.",
+        "experience": [{"company": "Northwind", "role": "Engineer", "bullets": ["Built FastAPI APIs."]}],
+        "skills": [{"category": "Backend", "items": ["Python", "FastAPI"]}],
+    }
+    jd_requirements = [
+        {"requirement": "Experience with Django and OpenAI APIs", "status": "demonstrated", "category": "technical"},
+    ]
+    result, validation, _ = await SectionEnhancementAgent().enhance(
+        content=content,
+        facts=[],
+        target_sections=["skills"],
+        user_request="improve my skills as per JD",
+        jd_requirements=jd_requirements,
+        section_requirements={"skills": ["Experience with Django and OpenAI APIs"]},
+    )
+    added = [change.after for change in result.proposed_changes if change.operation == "add"]
+    assert "Django" in added and "OpenAI" in added
+    assert all(not error.startswith("Dropped") for error in validation.errors)
+    candidate = build_candidate(content, result.proposed_changes)
+    assert "Django" in candidate["skills"][0]["items"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_never_crosses_conversations(tmp_path, monkeypatch):
+    """A new conversation must not inherit another conversation's messages or job description."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.orchestrator as orchestrator_module
+    from app.db import Base
+    from app.models import Conversation, JobDescription, Message, Resume, ResumeVersion, Run, User
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'iso.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(orchestrator_module, "SessionLocal", Session)
+
+    with Session() as db:
+        db.add(User(id="u1"))
+        db.add(Resume(id="res1", user_id="u1", title="R", original_filename="r.pdf", mime_type="application/pdf", storage_path="x"))
+        db.add(ResumeVersion(id="ver1", resume_id="res1", version_number=1, content={"professional_summary": "Engineer."}))
+        db.add(JobDescription(id="jd1", user_id="u1", raw_text="Django job", parsed={}))
+        db.add(Conversation(id="convA", user_id="u1", resume_id="res1", job_description_id="jd1"))
+        db.add(Conversation(id="convB", user_id="u1", resume_id="res1"))
+        db.add(Message(conversation_id="convA", role="user", content="SECRET-OLD-MESSAGE"))
+        db.add(Message(conversation_id="convA", role="assistant", content="SECRET-OLD-REPLY"))
+        db.add(Run(id="runA", user_id="u1", conversation_id="convA", resume_id="res1", user_message="old"))
+        db.add(Run(id="runB", user_id="u1", conversation_id="convB", resume_id="res1", user_message="new"))
+        db.commit()
+
+    state = await orchestrator_module.Orchestrator().load_context({"run_id": "runB"})
+    assert state["has_jd"] is False
+    assert "SECRET" not in state["conversation_summary"]
+
+
+def test_cosmetic_swaps_and_invented_credentials_are_rejected():
+    from app.agents.section_enhancement import _invented_credential, _is_cosmetic_swap
+
+    assert _is_cosmetic_swap(
+        "Developed a system to aggregate data, generating detailed reports.",
+        "Engineered a system to aggregate data, producing comprehensive reports.",
+    )
+    assert not _is_cosmetic_swap(
+        "Developed a system to aggregate data.",
+        "Built a Django service that ingests building permits and exposes them over REST.",
+    )
+    assert _invented_credential("AI/ML — IIT Guwahati", "PG Certification in AI/ML — IIT Guwahati") == "pg certification"
+    assert _invented_credential("PG Certification in AI/ML", "PG Certification in AI/ML — IIT Guwahati") is None
+
+
+@pytest.mark.asyncio
+async def test_missing_skills_alone_produce_skill_additions(monkeypatch):
+    """The match result's skill ledger must be enough on its own.
+
+    This is the failure the user hit: the analysis listed missing skills, but the enhancement
+    step received no section requirements and therefore proposed nothing for the skills list.
+    """
+    from app.agents import section_enhancement as section_enhancement_module
+    from app.agents.section_enhancement import SectionEnhancementAgent
+
+    monkeypatch.setattr(section_enhancement_module.llm, "enabled", False)
+    content = {
+        "professional_summary": "Backend engineer.",
+        "experience": [{"company": "Northwind", "role": "Engineer", "bullets": ["Built services."]}],
+        "skills": [{"category": "Backend", "items": ["Python"]}],
+    }
+    result, validation, meta = await SectionEnhancementAgent().enhance(
+        content=content,
+        facts=[],
+        target_sections=["experience"],
+        user_request="match my skills according to this JD",
+        jd_requirements=[],
+        section_requirements={},
+        missing_skills=["Django", "PostgreSQL"],
+    )
+    additions = [change.after for change in result.proposed_changes if change.operation == "add"]
+    assert additions == ["Django", "PostgreSQL"]
+    assert meta.get("skill_additions") == 2
+    assert validation.errors == []
+
+
+@pytest.mark.asyncio
+async def test_jd_skills_are_reconciled_even_when_routing_omits_skills(monkeypatch):
+    from app.agents import section_enhancement as section_enhancement_module
+    from app.agents.section_enhancement import SectionEnhancementAgent
+
+    monkeypatch.setattr(section_enhancement_module.llm, "enabled", False)
+    content = {
+        "professional_summary": "Backend engineer.",
+        "experience": [{"company": "Northwind", "role": "Engineer", "bullets": ["Built services."]}],
+        "skills": [{"category": "Backend", "items": ["Python"]}],
+    }
+    result, validation, meta = await SectionEnhancementAgent().enhance(
+        content=content,
+        facts=[],
+        target_sections=["professional_summary", "experience"],
+        user_request="tailor my resume to this JD",
+        jd_requirements=[{"requirement": "Django services", "status": "demonstrated", "category": "technical"}],
+        section_requirements={"skills": ["Django services"]},
+    )
+    assert "skills" in meta["sections"]
+    assert "Django" in [change.after for change in result.proposed_changes if change.operation == "add"]
+    assert not any("education" in error for error in validation.errors)
+
+
 def test_vector_index_ranks_relevant_fact_first():
     index = VectorIndex()
     index.add("relevant", "Built FastAPI services on Kubernetes with PostgreSQL.")
@@ -123,3 +271,113 @@ def test_ssrf_guard_rejects_local_and_private_targets():
     assert not is_public_http_url("http://127.0.0.1/")
     assert not is_public_http_url("http://10.0.0.5/")
     assert not is_public_http_url("file:///etc/passwd")
+
+
+def test_role_only_tailoring_uses_researched_requirements():
+    """\"Optimize my resume for a forward deployed engineer role\" has no JD to read.
+
+    The router must research the role's requirements instead of asking for a job
+    description or silently proposing generic rewrites.
+    """
+    from app.schemas import Intent
+    from app.orchestrator import heuristic_intent, validate_intent
+
+    message = "optimize my resume for forward deployed engineer role"
+    raw = heuristic_intent(
+        message, has_resume=True, has_jd=False, conversation_company=None, conversation_role=None
+    )
+    assert raw.intent == Intent.JOB_MATCHING
+    assert raw.requirements_research is True
+    assert raw.target_role and "forward deployed engineer" in raw.target_role.lower()
+    assert {"job_matching", "section_enhancement"}.issubset(set(raw.agents))
+    assert raw.requires_job_description is False
+
+    validated = validate_intent(
+        raw,
+        message=message,
+        has_resume=True,
+        has_jd=False,
+        content=RESUME,
+        conversation_company=None,
+        conversation_role=None,
+    )
+    assert validated.clarification_required is False
+    assert validated.requires_job_description is False
+    assert validated.requirements_research is True
+    assert "skills" in validated.target_sections and "experience" in validated.target_sections
+
+
+def test_company_only_tailoring_attaches_requirement_research():
+    from app.schemas import Intent
+    from app.orchestrator import heuristic_intent, validate_intent
+
+    message = "optimize my resume for google"
+    raw = heuristic_intent(
+        message, has_resume=True, has_jd=False, conversation_company=None, conversation_role=None
+    )
+    assert raw.target_company == "Google"
+    assert raw.intent == Intent.COMPANY_OPTIMIZATION
+    assert raw.requirements_research is True
+    assert "job_matching" in raw.agents
+
+    validated = validate_intent(
+        raw,
+        message=message,
+        has_resume=True,
+        has_jd=False,
+        content=RESUME,
+        conversation_company=None,
+        conversation_role=None,
+    )
+    assert validated.clarification_required is False
+    assert "job_matching" in validated.agents
+    assert validated.requirements_research is True
+
+
+@pytest.mark.asyncio
+async def test_role_research_builds_brief_from_web_sources(monkeypatch):
+    from app.agents import role_research as role_research_module
+    from app.llm import LLMResult
+
+    async def fake_web_search(*, prompt, system=None, max_results=None, max_tokens=1100, temperature=0.2):
+        assert "Forward Deployed Engineer" in prompt
+        return LLMResult(
+            {
+                "text": (
+                    "Role overview:\n- Customer-facing engineer who ships models into production\n\n"
+                    "Responsibilities:\n- Deploy models on customer infrastructure\n\n"
+                    "Requirements:\n- 3+ years of Python\n- Willingness to travel to customers\n\n"
+                    "Skills:\nPython, Docker, Kubernetes"
+                ),
+                "sources": [
+                    {"title": "Forward Deployed Engineer — OpenAI", "url": "https://openai.com/careers/fde", "snippet": "..."},
+                ],
+            },
+            None,
+            False,
+        )
+
+    monkeypatch.setattr(role_research_module.llm, "web_search", fake_web_search)
+    research, meta = await role_research_module.RoleResearchAgent().research(
+        role="Forward Deployed Engineer", company=None
+    )
+    assert meta["mode"] == "web"
+    assert research.brief.startswith("Target role: Forward Deployed Engineer")
+    assert any("3+ years" in item for item in research.requirements)
+    assert "Python" in research.skills
+    assert research.sources[0]["url"] == "https://openai.com/careers/fde"
+    assert "https://openai.com/careers/fde" in research.brief
+    assert research.as_dict()["profile"]["requirements"]
+
+
+def test_skills_additions_must_be_labels_not_sentences():
+    from app.agents.section_enhancement import _looks_like_skill
+
+    assert _looks_like_skill("Django")
+    assert _looks_like_skill("REST APIs")
+    assert _looks_like_skill("Prompt Engineering")
+    assert not _looks_like_skill("Experience shipping production code in Python.")
+    assert not _looks_like_skill("Strong hands-on experience with Generative AI and LLMs")
+    assert _looks_like_skill("RAG pipelines")
+    assert not _looks_like_skill("Coding Skills")
+    assert not _looks_like_skill("Integration Architectures")

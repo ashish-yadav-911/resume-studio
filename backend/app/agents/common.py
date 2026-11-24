@@ -28,7 +28,7 @@ SKILL_VOCAB: dict[str, list[str]] = {
     "LangChain": ["langchain"],
     "LangGraph": ["langgraph"],
     "RAG": ["rag", "retrieval-augmented generation", "retrieval augmented generation"],
-    "LLM": ["llm", "large language model", "large language models"],
+    "LLM": ["llm", "llms", "large language model", "large language models"],
     "OpenAI": ["openai", "gpt-4", "gpt-3", "chatgpt"],
     "PyTorch": ["pytorch"],
     "TensorFlow": ["tensorflow"],
