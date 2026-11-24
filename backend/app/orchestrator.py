@@ -86,7 +86,7 @@ SECTION_WORDS = {
     "projects": ["projects", "portfolio"],
     "education": ["education", "academic"],
     "certifications": ["certifications", "certificates", "licenses"],
-    "languages": ["languages"],
+    "personal_information": ["name", "personal information", "contact info", "headline"],
 }
 
 LANGUAGE_MAP = {
@@ -228,7 +228,7 @@ def _extract_jd_from_message(message: str) -> str | None:
 def _wants_changes(message: str) -> bool:
     return bool(
         re.search(
-            r"\b(optimi[sz]e|tailor|update|rewrite|improve|enhance|modify|adjust|apply|make .* (better|impactful|stronger))\b",
+            r"\b(optimi[sz]e|tailor|update|rewrite|improve|enhance|modify|adjust|apply|change|rename|make .* (better|impactful|stronger))\b",
             message,
             re.I,
         )
@@ -305,7 +305,7 @@ def heuristic_intent(
         )
     if job_language or jd_in_message:
         agents = [AGENT_MATCHING]
-        if _wants_changes(message) and not re.search(r"\b(tell me|just|only|score|how well|explain)\b", lower):
+        if _wants_changes(message) and not re.search(r"\b(tell me|just|score|how well|explain)\b", lower):
             agents.append(AGENT_ENHANCEMENT)
         return IntentResult(
             intent=Intent.JOB_MATCHING,
@@ -374,16 +374,25 @@ def validate_intent(
 ) -> IntentResult:
     """Deterministic guardrails around the LLM classification."""
     intent = raw.intent
-    agents = set(raw.agents)
     message_lower = message.lower()
     company = raw.target_company or _extract_company(message) or conversation_company
     role = raw.target_role or _extract_role(message) or conversation_role
+    job_language = bool(
+        re.search(r"\b(job description|jd|match|fit|ats|requirements|qualified|qualifications|compare my resume|how well)\b", message.lower())
+    ) or has_jd
+    # Coerce JD-driven tailoring to job matching when no company is named.
+    if has_jd and not company and intent in {Intent.SECTION_ENHANCEMENT, Intent.RESUME_ANALYSIS} and (
+        _wants_changes(message) or job_language
+    ):
+        intent = Intent.JOB_MATCHING
+    agents = set(raw.agents)
     language, market = _extract_language_market(message)
     language = raw.translation_language or language
     market = raw.translation_market or market
-    sections = [s for s in (raw.target_sections or _extract_sections(message)) if s in SECTION_WORDS]
+    explicit_sections = _extract_sections(message)
+    sections = [s for s in (raw.target_sections or explicit_sections) if s in SECTION_WORDS]
     if not sections:
-        sections = _extract_sections(message)
+        sections = explicit_sections
 
     # Remove hallucinated companies that do not appear in the message or prior context.
     if raw.target_company:
@@ -419,9 +428,13 @@ def validate_intent(
         agents.add(AGENT_MATCHING)
         if not has_jd:
             agents.discard(AGENT_MATCHING)
-        if _wants_changes(message) and not re.search(r"\b(tell me|just|only|score|how well|explain)\b", message_lower):
+        if _wants_changes(message) and not re.search(r"\b(tell me|just|score|how well|explain)\b", message_lower):
             agents.add(AGENT_ENHANCEMENT)
     agents.discard(AGENT_TRANSLATION)
+    if not company:
+        agents.discard(AGENT_RESEARCH)
+    if not has_jd:
+        agents.discard(AGENT_MATCHING)
 
     if not has_resume:
         agents = set()
@@ -430,9 +443,15 @@ def validate_intent(
     requires_language = intent == Intent.TRANSLATION
 
     if not sections:
-        sections = ["experience", "skills", "professional_summary"] if intent in {
-            Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING
-        } else ["experience"] if intent == Intent.SECTION_ENHANCEMENT else []
+        if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING}:
+            sections = ["experience", "skills", "professional_summary", "education"]
+        elif intent == Intent.SECTION_ENHANCEMENT:
+            sections = ["personal_information"] if re.search(r"\bname\b", message_lower) else ["experience"]
+        else:
+            sections = []
+    # For JD-driven tailoring, always consider all core sections; section enhancement only proposes evidence-backed changes.
+    if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING} and has_jd:
+        sections = ["experience", "skills", "professional_summary", "education"]
 
     clarification = None
     if intent not in {Intent.GENERAL_CHAT, Intent.UNDO, Intent.REDO} and not has_resume:
@@ -1059,24 +1078,26 @@ class Orchestrator:
             }
             run.updated_at = utcnow()
             conversation = db.get(Conversation, run.conversation_id)
+            assistant_message: Message | None = None
             if conversation:
                 existing = db.scalar(
                     select(Message).where(Message.run_id == run_id, Message.role == "assistant")
                 )
                 if not existing:
-                    db.add(
-                        Message(
-                            conversation_id=conversation.id,
-                            role="assistant",
-                            content=response,
-                            run_id=run_id,
-                            meta={
-                                "status": status,
-                                "proposal_id": proposal_id,
-                                "intent": run.intent,
-                            },
-                        )
+                    assistant_message = Message(
+                        conversation_id=conversation.id,
+                        role="assistant",
+                        content=response,
+                        run_id=run_id,
+                        meta={
+                            "status": status,
+                            "proposal_id": proposal_id,
+                            "intent": run.intent,
+                        },
                     )
+                    db.add(assistant_message)
+                else:
+                    assistant_message = existing
                 conversation.message_count += 0
                 conversation.updated_at = utcnow()
                 if conversation.title in {"New conversation", ""}:
@@ -1086,6 +1107,15 @@ class Orchestrator:
                     if user_message:
                         conversation.title = user_message.content.strip().split("\n")[0][:80] or "Resume session"
             db.commit()
+            if assistant_message is not None and conversation is not None:
+                db.refresh(assistant_message)
+                try:
+                    from .firestore_sync import mirror_conversation, mirror_message
+
+                    mirror_message(assistant_message, run.user_id)
+                    mirror_conversation(conversation)
+                except Exception:  # pragma: no cover - optional mirror
+                    pass
 
         event_type = {
             "awaiting_approval": "run.awaiting_approval",

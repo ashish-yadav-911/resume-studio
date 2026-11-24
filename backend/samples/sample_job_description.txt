@@ -1,0 +1,26 @@
+Senior AI Platform Engineer — Lumen Systems (Remote, Full-time)
+
+About Lumen Systems
+Lumen Systems builds developer tooling for production AI applications. Our platform team owns the
+services that route, evaluate and observe LLM traffic for enterprise customers.
+
+About the role
+You will design retrieval and orchestration services, partner with product teams, and keep
+latency and reliability predictable as usage grows.
+
+Responsibilities
+- Build production LLM systems and evaluation pipelines.
+- Design retrieval-augmented generation workflows with strong observability.
+- Partner with product and design teams to ship internal and customer-facing tools.
+- Improve p95 latency and reliability of high-volume API services.
+
+Requirements
+- 4+ years of experience building backend or AI application services.
+- Strong Python and SQL.
+- Hands-on experience with RAG, LangChain or LangGraph, and OpenAI APIs.
+- Experience with Kubernetes and PostgreSQL in production.
+- Clear written communication and collaborative delivery.
+
+Preferred
+- Nice to have: TypeScript for internal tooling.
+- Experience with embedding caches and batch inference.

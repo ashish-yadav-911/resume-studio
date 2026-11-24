@@ -119,7 +119,9 @@ def validate_upload(filename: str, data: bytes, declared_mime: str | None) -> tu
     suffix = Path(safe_name).suffix.lower()
     if suffix not in {".pdf", ".docx"}:
         raise DocumentError(
-            "UNSUPPORTED_FILE_TYPE", "Only text-based PDF and DOCX resumes are supported."
+            "UNSUPPORTED_FILE_TYPE",
+            "Only text-based PDF and DOCX resumes are supported.",
+            415,
         )
     if suffix == ".pdf":
         if not data.startswith(b"%PDF-"):

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user, owned_conversation, owned_resume
 from ..config import settings
 from ..db import get_db
+from ..firestore_sync import mirror_conversation, mirror_message
 from ..models import (
     Conversation,
     JobDescription,
@@ -54,6 +55,7 @@ def create_conversation(
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
+    mirror_conversation(conversation)
     return conversation_out(conversation)
 
 
@@ -173,6 +175,10 @@ async def post_message(
         db.flush()
         conversation.job_description_id = jd.id
 
+    # Name the conversation from the first user prompt instead of leaving "New conversation".
+    if not conversation.title or conversation.title == "New conversation":
+        conversation.title = (payload.content or "").strip()[:80] or "New conversation"
+
     message = Message(
         conversation_id=conversation.id,
         role="user",
@@ -198,6 +204,8 @@ async def post_message(
     db.commit()
     db.refresh(run)
     db.refresh(message)
+    mirror_message(message, user.id)
+    mirror_conversation(conversation)
     _schedule(run.id)
     logger.info("Created run %s for conversation %s", run.id, conversation.id)
     return {

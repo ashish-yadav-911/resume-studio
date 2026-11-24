@@ -332,6 +332,13 @@ def create_version(
     if commit:
         db.commit()
         db.refresh(version)
+        try:
+            from .firestore_sync import mirror_resume, mirror_version
+
+            mirror_version(resume, version)
+            mirror_resume(resume)
+        except Exception:  # pragma: no cover - mirroring is always optional
+            pass
     return version
 
 

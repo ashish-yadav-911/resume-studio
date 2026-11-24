@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..llm import SYSTEM_GUARD, llm
-from ..resume_service import extract_metrics, normalize_text, resume_text
+from ..resume_service import extract_metrics, resume_text
 from ..schemas import JobMatchResult, ParsedJobDescription, Requirement, ScoreBreakdown
+from ..vector_store import VectorIndex
 from .common import extract_skills, quote_in_resume, skill_status, summarize_resume_for_prompt
 
 WEIGHTS = {
@@ -309,9 +310,13 @@ def fallback_requirements(content: dict[str, Any], parsed: ParsedJobDescription,
                         break
         else:
             content_words = [w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in STOPWORDS]
+            index = VectorIndex()
+            index.extend([(str(position), fact, None) for position, fact in enumerate(facts)])
+            hits = index.search(text, top_k=3)
+            candidates_for_match = [record.text for _, record in hits] or facts
             best_ratio = 0.0
             best_fact = ""
-            for fact in facts:
+            for fact in candidates_for_match:
                 fact_lower = fact.lower()
                 ratio = sum(1 for w in content_words if w in fact_lower) / max(1, len(content_words))
                 if ratio > best_ratio:

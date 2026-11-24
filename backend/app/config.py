@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     dev_user_id: str = "demo-user"
     firebase_project_id: str | None = None
     firebase_credentials_path: str | None = None
+    # Optional write-through mirror of conversations, messages and immutable
+    # versions to Firestore.  SQLite remains the transactional source of truth.
+    firebase_sync_enabled: bool = True
+    firebase_collection_prefix: str = "resume_studio"
 
     # LLM
     openai_api_key: str | None = None

@@ -57,6 +57,24 @@ def company_slug(company: str) -> str:
     return re.sub(r"[^a-z0-9]", "", company.lower())
 
 
+NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _is_blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # NAT64 (RFC 6052) embeds the real IPv4 destination in the last 32 bits.
+    # Python marks the well-known prefix as "reserved", so unwrap it first.
+    if isinstance(address, ipaddress.IPv6Address) and address in NAT64_PREFIX:
+        return _is_blocked_address(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
 def is_public_http_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -71,15 +89,14 @@ def is_public_http_url(url: str) -> bool:
         return False
     try:
         address = ipaddress.ip_address(host)
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
-            return False
+        return not _is_blocked_address(address)
     except ValueError:
         # Resolve DNS and reject private answers (best-effort SSRF guard).
         try:
             infos = socket.getaddrinfo(host, None)
             for info in infos:
                 resolved = ipaddress.ip_address(info[4][0])
-                if resolved.is_private or resolved.is_loopback or resolved.is_link_local or resolved.is_reserved:
+                if _is_blocked_address(resolved):
                     return False
         except (socket.gaierror, ValueError):
             return False

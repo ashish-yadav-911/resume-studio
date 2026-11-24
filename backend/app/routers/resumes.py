@@ -12,6 +12,7 @@ from ..auth import get_current_user, owned_resume
 from ..config import settings
 from ..db import get_db
 from ..export import build_docx, build_pdf, export_filename
+from ..firestore_sync import delete_resume_mirror
 from ..models import Resume, ResumeVersion, User, new_id, utcnow
 from ..parsing import DocumentError, parse_resume
 from ..resume_service import (
@@ -363,6 +364,7 @@ def delete_resume(
     supersede_pending_proposals(db, resume.id, commit=False)
     resume.deleted_at = utcnow()
     db.commit()
+    delete_resume_mirror(resume)
     try:
         Path(resume.storage_path).unlink(missing_ok=True)
     except OSError:

@@ -73,10 +73,10 @@ def normalize_sections(sections: list[str], content: dict[str, Any]) -> list[str
         if key in SECTION_PATHS and key not in output:
             output.append(key)
     if not output:
-        for section in ("experience", "skills", "professional_summary"):
+        for section in ("experience", "skills", "professional_summary", "education"):
             if content.get(section):
                 output.append(section)
-    return output[:5]
+    return output[:6]
 
 
 def _change_id(path: str, after: str, index: int) -> str:
@@ -166,15 +166,25 @@ class SectionEnhancementAgent:
             "Rules:\n"
             "- Return only replacements for existing string fields. field_path must be a dot path with numeric "
             "indices, e.g. experience.0.bullets.1. before must be copied VERBATIM from the section JSON.\n"
+            "- If the user asks to change a specific field (for example their name), make exactly that change and "
+            "leave other fields untouched.\n"
             "- Improve specificity, action verbs, clarity and structure. Do not add employers, dates, degrees, "
             "tools, responsibilities, team sizes, or outcomes that are not evidenced.\n"
             "- Metrics: only reuse numbers already present in the resume. Never invent a number. If impact would "
             "benefit from a metric that is absent, explain that in summary instead of inventing one.\n"
             "- Do not add a technology unless it appears in the evidence facts.\n"
             "- supporting_fact_ids must come from evidence_facts. Explain each change in reason.\n"
+            "- Tailor to the target role and job requirements, not generic wording. Align skill names and ordering "
+            "with the job description when the candidate already demonstrates them; put JD-required skills first. "
+            "Prune clearly irrelevant skills by replacing them with relevant evidenced skills; never invent a new "
+            "technology. Mention skills to add (missing JD skills) and skills to remove (irrelevant) in summary.\n"
+            "- If a job requirement is missing from the resume, do not add it; mention it as a gap in summary.\n"
+            "- For experience bullets, strengthen verbs and incorporate JD keywords only where supported by evidence.\n"
+            "- Rewrite the professional summary to target the role using only evidenced skills and experience.\n"
+            "- Improve education/certifications clarity without fabricating details.\n"
             "- Avoid keyword stuffing and do not copy sentences from the job description.\n"
             "- Keep bullets under 320 characters and preserve meaning.\n"
-            "Return 2-8 changes total."
+            "Return 4-10 changes across the selected sections."
         )
         return await llm.structured(
             system=SYSTEM_GUARD,
@@ -286,9 +296,13 @@ class SectionEnhancementAgent:
                 dropped.append(change_id)
                 continue
             if section == "personal_information":
-                errors.append("Protected personal information cannot be modified automatically.")
-                dropped.append(change_id)
-                continue
+                if not (
+                    change.field_path == "personal_information.full_name"
+                    and re.search(r"\b(name|rename)\b", user_request or "", re.I)
+                ):
+                    errors.append("Protected personal information cannot be modified automatically.")
+                    dropped.append(change_id)
+                    continue
             try:
                 actual = get_path(content, change.field_path)
             except KeyError:

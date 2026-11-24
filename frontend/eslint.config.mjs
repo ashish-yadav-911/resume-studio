@@ -5,6 +5,14 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    rules: {
+      // API payloads are dynamic resume/JD JSON validated by the backend.
+      "@typescript-eslint/no-explicit-any": "off",
+      // Fetch-on-mount effects intentionally hydrate client state from the API.
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

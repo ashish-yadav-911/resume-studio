@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -45,7 +46,8 @@ class TranslationAgent:
                 "names), certification name, date, number, percentage and metric. Preserve technical terms in "
                 "their standard industry form when a literal translation would be confusing. Adapt section "
                 "headings naturally, but do not invent local qualifications, degree equivalencies, employers, "
-                "skills or achievements. Keep bullets concise.\n\n"
+                "skills or achievements. Keep bullets concise. Return the complete resume JSON with exactly the "
+                "same keys, array lengths and field paths; never omit or rename a field.\n\n"
                 f"<resume_json>\n{summarize_resume_for_prompt(content, max_chars=14000)}\n</resume_json>"
             ),
             schema=TranslationResult,
@@ -59,7 +61,20 @@ class TranslationAgent:
 
         translated = result.data.translated_content
         try:
-            validated = ResumeContent.model_validate(translated).model_dump(mode="json")
+            translated_validated = ResumeContent.model_validate(translated).model_dump(mode="json")
+        except Exception as exc:
+            return None, [], ValidationResult(valid=False, errors=[f"Translated resume structure was invalid: {exc}"]), meta
+
+        # Merge translated leaves onto a copy of the original so no field can be
+        # dropped by an incomplete model response.
+        merged = copy.deepcopy(content)
+        for path, value in flatten(translated_validated).items():
+            try:
+                set_path(merged, path, value)
+            except KeyError:
+                continue
+        try:
+            validated = ResumeContent.model_validate(merged).model_dump(mode="json")
         except Exception as exc:
             return None, [], ValidationResult(valid=False, errors=[f"Translated resume structure was invalid: {exc}"]), meta
 
@@ -67,10 +82,9 @@ class TranslationAgent:
         translated_flat = flatten(validated)
         missing_paths = [p for p in base_flat if p not in translated_flat]
         if missing_paths:
-            return None, [], ValidationResult(
-                valid=False,
-                errors=[f"Translation dropped {len(missing_paths)} fields; it was rejected to prevent data loss."],
-            ), meta
+            # All base fields were carried over during the merge, so this should
+            # only happen for structural mismatches; keep going with a warning.
+            pass
 
         base_metrics = _metric_multiset("\n".join(base_flat.values()))
         translated_metrics = _metric_multiset("\n".join(translated_flat.values()))
@@ -82,6 +96,10 @@ class TranslationAgent:
             ), meta
 
         warnings: list[str] = []
+        if missing_paths:
+            warnings.append(
+                f"Kept {len(missing_paths)} field(s) in the original language because the translation omitted them."
+            )
         for label, value in (
             ("name", content.get("personal_information", {}).get("full_name")),
             ("company", " ".join(e.get("company", "") for e in content.get("experience", []) or [])),

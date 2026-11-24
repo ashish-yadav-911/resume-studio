@@ -14,11 +14,22 @@ os.environ.setdefault("OPENAI_API_KEY", "")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.security import rate_limiter  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_database():
+    """Give every test an isolated schema; the suite must be order-independent."""
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    rate_limiter._buckets.clear()
+    yield
 
 
 @pytest.fixture
-def client():
+def client(_reset_database):
     with TestClient(app) as client:
         client.headers.update({"X-Dev-User": "test-user"})
         yield client

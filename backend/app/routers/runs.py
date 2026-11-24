@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user, owned_run
 from ..db import SessionLocal, get_db
 from ..events import TERMINAL_EVENTS, bus, replay_events
-from ..models import Message, Proposal, Resume, ResumeVersion, Run, User, utcnow
+from ..firestore_sync import mirror_conversation, mirror_message, mirror_resume, mirror_version
+from ..models import Conversation, Message, Proposal, Resume, ResumeVersion, Run, User, utcnow
 from ..resume_service import apply_changes, create_version, get_path, supersede_pending_proposals
 from ..schemas import ApproveRequest, RejectRequest, ResumeContent
 from ..serializers import iso, proposal_out, run_out, version_state, version_to_dict
@@ -230,20 +231,26 @@ async def approve_run(
     ).all()
     for other in other_pending:
         other.status = "superseded"
-    db.add(
-        Message(
-            conversation_id=run.conversation_id,
-            role="assistant",
-            content=(
-                f"Approved {len(selected)} change(s) and created version v{version.version_number}. "
-                "The proposal remains available in your version history."
-            ),
-            run_id=None,
-            meta={"action": "proposal.approved", "proposal_id": proposal.id, "version_id": version.id},
-        )
+    message = Message(
+        conversation_id=run.conversation_id,
+        role="assistant",
+        content=(
+            f"Approved {len(selected)} change(s) and created version v{version.version_number}. "
+            "The proposal remains available in your version history."
+        ),
+        run_id=None,
+        meta={"action": "proposal.approved", "proposal_id": proposal.id, "version_id": version.id},
     )
+    db.add(message)
     db.commit()
     db.refresh(version)
+    db.refresh(message)
+    mirror_version(resume, version)
+    mirror_resume(resume)
+    mirror_message(message, user.id)
+    conversation = db.get(Conversation, run.conversation_id)
+    if conversation:
+        mirror_conversation(conversation)
     await bus.emit(
         db, run.id, "proposal.approved",
         {
@@ -281,15 +288,19 @@ async def reject_run(
     proposal.decided_at = utcnow()
     run.status = "rejected"
     run.updated_at = utcnow()
-    db.add(
-        Message(
-            conversation_id=run.conversation_id,
-            role="assistant",
-            content="No changes were saved. Your active resume version is unchanged.",
-            run_id=None,
-            meta={"action": "proposal.rejected", "proposal_id": proposal.id, "reason": payload.reason[:500]},
-        )
+    message = Message(
+        conversation_id=run.conversation_id,
+        role="assistant",
+        content="No changes were saved. Your active resume version is unchanged.",
+        run_id=None,
+        meta={"action": "proposal.rejected", "proposal_id": proposal.id, "reason": payload.reason[:500]},
     )
+    db.add(message)
     db.commit()
+    db.refresh(message)
+    mirror_message(message, user.id)
+    conversation = db.get(Conversation, run.conversation_id)
+    if conversation:
+        mirror_conversation(conversation)
     await bus.emit(db, run.id, "proposal.rejected", {"proposal_id": proposal.id, "status": "rejected"})
     return {"idempotent": False, "proposal": proposal_out(proposal, include_candidate=False)}
