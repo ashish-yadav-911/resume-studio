@@ -178,6 +178,8 @@ class SectionEnhancementAgent:
             "with the job description when the candidate already demonstrates them; put JD-required skills first. "
             "Prune clearly irrelevant skills by replacing them with relevant evidenced skills; never invent a new "
             "technology. Mention skills to add (missing JD skills) and skills to remove (irrelevant) in summary.\n"
+            "- For skills items, never append parenthetical explanations or alternate labels (for example "
+            "'vLLM (LLM management)' is invalid). Use the canonical skill name only, or leave the item unchanged.\n"
             "- If a job requirement is missing from the resume, do not add it; mention it as a gap in summary.\n"
             "- For experience bullets, strengthen verbs and incorporate JD keywords only where supported by evidence.\n"
             "- Rewrite the professional summary to target the role using only evidenced skills and experience.\n"

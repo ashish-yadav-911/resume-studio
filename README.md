@@ -212,3 +212,25 @@ ARCHITECTURE.md        system, trust boundary, storage, security
 - Postgres support is schema-level; install a Postgres driver (for example `psycopg[binary]`) and
   run migrations before pointing `DATABASE_URL` at it.
 - No billing, team roles, email delivery or mobile app.
+
+## Intent routing (10 intents)
+
+The orchestrator classifies each user message into one of these intents and selects only the
+agents required:
+
+1. `GENERAL_CHAT`
+2. `RESUME_ANALYSIS`
+3. `COMPANY_OPTIMIZATION`
+4. `JOB_MATCHING`
+5. `SECTION_ENHANCEMENT`
+6. `TRANSLATION`
+7. `RESUME_EXPORT`
+8. `VERSION_COMPARISON`
+9. `UNDO`
+10. `REDO`
+
+Agents (4): `company_research`, `job_matching`, `section_enhancement`, `translation`.
+
+When a job description is attached, JD-driven tailoring defaults to all core sections
+(experience, skills, professional summary, education) unless the user explicitly names a
+section (for example "skills only").

@@ -449,8 +449,9 @@ def validate_intent(
             sections = ["personal_information"] if re.search(r"\bname\b", message_lower) else ["experience"]
         else:
             sections = []
-    # For JD-driven tailoring, always consider all core sections; section enhancement only proposes evidence-backed changes.
-    if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING} and has_jd:
+    # For JD-driven tailoring, default to all core sections only when the user did not name a
+    # specific section. Explicit requests such as "skills only" are honored.
+    if intent in {Intent.COMPANY_OPTIMIZATION, Intent.JOB_MATCHING} and has_jd and not explicit_sections and not raw.target_sections:
         sections = ["experience", "skills", "professional_summary", "education"]
 
     clarification = None
